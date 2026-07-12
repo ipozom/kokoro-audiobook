@@ -1,0 +1,24 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color: #111827;
+  background:
+    radial-gradient(circle at top left, rgba(247, 231, 181, 0.9), transparent 35%),
+    linear-gradient(180deg, #f8fafc 0%, #ece7df 100%);
+  font-family: "Source Sans 3", ui-sans-serif, system-ui, sans-serif;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+.sentence-active {
+  background: linear-gradient(120deg, rgba(194, 65, 12, 0.22), rgba(247, 231, 181, 0.8));
+}
