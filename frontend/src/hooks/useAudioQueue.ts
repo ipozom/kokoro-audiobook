@@ -1,4 +1,4 @@
-import { useEffect, useEffectEvent, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { queueSynthesis, saveProgress } from "../lib/api";
 import type { ParsedDocument, PlaybackProgress, SentenceChunk, SynthesisQueueItem } from "../types";
@@ -82,37 +82,59 @@ export function useAudioQueue(document: ParsedDocument | null, initialProgress: 
     });
   }, [document, initialProgress]);
 
-  const handleEnded = useEffectEvent(() => {
+  function handleEnded(): void {
     const activeDocument = documentRef.current;
     if (!activeDocument) {
       return;
     }
 
-    console.log("ENDED:", sentenceIndexRef.current);
+    console.log("[DEBUG] ENDED:", {
+      currentSentenceIndex: sentenceIndexRef.current
+    });
     void advanceToNextSentence(activeDocument, sentenceIndexRef.current);
-  });
+  }
+
+  function handlePlay(): void {
+    const activeDocument = documentRef.current;
+    const sentence = activeDocument ? findSentenceByIndex(activeDocument.sentences, sentenceIndexRef.current) : null;
+    console.log("[DEBUG] START PLAYING:", {
+      sentenceIndex: sentenceIndexRef.current,
+      pageNumber: sentence?.pageNumber ?? null
+    });
+    console.info("[audio] playback started", {
+      sentenceIndex: sentenceIndexRef.current,
+      playbackRate: playbackRateRef.current
+    });
+  }
+
+  function handleError(): void {
+    const audio = audioRef.current;
+    const message = audio?.error?.message ?? `media error code ${audio?.error?.code ?? "unknown"}`;
+    console.error("[audio] playback failed", {
+      sentenceIndex: sentenceIndexRef.current,
+      message
+    });
+    setState((current) => ({ ...current, isPlaying: false, isLoading: false, error: message }));
+  }
 
   useEffect(() => {
-    if (!audioRef.current) {
-      audioRef.current = new Audio();
-      audioRef.current.volume = 1;
-      audioRef.current.muted = false;
-      audioRef.current.addEventListener("ended", handleEnded);
-      audioRef.current.addEventListener("play", handlePlay);
-      audioRef.current.addEventListener("error", handleError);
-    }
+    const audio = audioRef.current ?? new Audio();
+    audioRef.current = audio;
+    audio.volume = 1;
+    audio.muted = false;
+    audio.addEventListener("ended", handleEnded);
+    audio.addEventListener("play", handlePlay);
+    audio.addEventListener("error", handleError);
 
     if (typeof window !== "undefined") {
-      window.__kokoroAudio = audioRef.current;
+      window.__kokoroAudio = audio;
     }
 
     return () => {
-      if (audioRef.current) {
-        audioRef.current.removeEventListener("ended", handleEnded);
-        audioRef.current.removeEventListener("play", handlePlay);
-        audioRef.current.removeEventListener("error", handleError);
-        audioRef.current.pause();
-      }
+      audio.removeEventListener("ended", handleEnded);
+      audio.removeEventListener("play", handlePlay);
+      audio.removeEventListener("error", handleError);
+      audio.pause();
       if (typeof window !== "undefined") {
         delete window.__kokoroAudio;
       }
@@ -127,23 +149,6 @@ export function useAudioQueue(document: ParsedDocument | null, initialProgress: 
 
     void persistProgress(document, state);
   }, [document, state.currentPage, state.currentSentenceIndex, state.isPlaying, state.playbackRate]);
-
-  const handlePlay = useEffectEvent(() => {
-    console.info("[audio] playback started", {
-      sentenceIndex: sentenceIndexRef.current,
-      playbackRate: playbackRateRef.current
-    });
-  });
-
-  const handleError = useEffectEvent(() => {
-    const audio = audioRef.current;
-    const message = audio?.error?.message ?? `media error code ${audio?.error?.code ?? "unknown"}`;
-    console.error("[audio] playback failed", {
-      sentenceIndex: sentenceIndexRef.current,
-      message
-    });
-    setState((current) => ({ ...current, isPlaying: false, isLoading: false, error: message }));
-  });
 
   async function play(): Promise<void> {
     await playSentenceAt(sentenceIndexRef.current);
@@ -293,6 +298,10 @@ export function useAudioQueue(document: ParsedDocument | null, initialProgress: 
 
     const sentence = findSentenceByIndex(activeDocument.sentences, index);
     if (!sentence) {
+      console.error("[DEBUG] PLAYBACK STOPPED:", {
+        reason: "Selected sentence is unavailable.",
+        currentSentenceIndex: index
+      });
       setState((current) => ({
         ...current,
         isPlaying: false,
@@ -316,17 +325,24 @@ export function useAudioQueue(document: ParsedDocument | null, initialProgress: 
       if (!src) {
         const nextPlayableIndex = await findNextPlayableSentenceIndex(activeDocument, index, playbackRateRef.current, cacheRef.current);
         if (nextPlayableIndex !== null) {
-          console.warn("SKIPPING SENTENCE:", {
+          console.warn("[DEBUG] SKIPPING SENTENCE:", {
             sentenceIndex: index,
             reason: "No playable audio returned for sentence",
             nextPlayableIndex
           });
-          console.log("PLAY NEXT:", nextPlayableIndex);
+          console.log("[DEBUG] SELECT NEXT SENTENCE:", {
+            fromIndex: index,
+            nextCandidate: nextPlayableIndex
+          });
           sentenceIndexRef.current = nextPlayableIndex;
           await playSentenceAt(nextPlayableIndex);
           return;
         }
 
+        console.error("[DEBUG] PLAYBACK STOPPED:", {
+          reason: "No playable audio returned and no forward candidate was found.",
+          currentSentenceIndex: index
+        });
         throw new Error("Failed to synthesize text");
       }
 
@@ -352,6 +368,10 @@ export function useAudioQueue(document: ParsedDocument | null, initialProgress: 
       }));
       void ensureBuffered(activeDocument, index + 1, playbackRateRef.current);
     } catch (error) {
+      console.error("[DEBUG] PLAYBACK STOPPED:", {
+        reason: error instanceof Error ? error.message : "Playback failed",
+        currentSentenceIndex: index
+      });
       setState((current) => ({
         ...current,
         isPlaying: false,
@@ -369,12 +389,20 @@ export function useAudioQueue(document: ParsedDocument | null, initialProgress: 
       cacheRef.current
     );
 
+    console.log("[DEBUG] SELECT NEXT SENTENCE:", {
+      fromIndex: currentSentenceIndex,
+      nextCandidate: nextSentenceIndex
+    });
+
     if (nextSentenceIndex === null) {
+      console.error("[DEBUG] PLAYBACK STOPPED:", {
+        reason: "No more playable sentences were found after the current sentence.",
+        currentSentenceIndex
+      });
       setState((current) => ({ ...current, isPlaying: false, isLoading: false }));
       return;
     }
 
-    console.log("PLAY NEXT:", nextSentenceIndex);
     sentenceIndexRef.current = nextSentenceIndex;
     await playSentenceAt(nextSentenceIndex);
   }
@@ -504,7 +532,7 @@ async function findNextPlayableSentenceIndex(
         return sentence.sentenceIndex;
       }
 
-      console.warn("SKIPPING SENTENCE:", {
+      console.warn("[DEBUG] SKIPPING SENTENCE:", {
         sentenceIndex: sentence.sentenceIndex,
         reason: "No playable audio returned after buffering"
       });

@@ -142,6 +142,11 @@ async function requestPythonSynthesis(request: SynthesisQueueRequest, mode: stri
   }
 
   const payload = (await response.json()) as PythonSynthesisResponse;
+  console.log("[DEBUG BACKEND] TTS RESPONSE:", {
+    requested: request.sentences.length,
+    returned: payload.items.length,
+    sentenceIndexes: payload.items.map((item) => item.sentence_index)
+  });
   return payload.items.map((item) => ({
     chunkId: item.chunk_id,
     sentenceIndex: item.sentence_index,
