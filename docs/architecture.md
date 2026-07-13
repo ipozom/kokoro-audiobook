@@ -63,6 +63,8 @@ Detailed sequence:
 - The frontend buffers a small upcoming sentence window.
 - Playback uses real WAV `Blob` object URLs rather than `data:` URLs.
 - The active sentence highlight tracks the current sentence index.
+- Queue progression searches forward by `sentenceIndex` in document order and only skips sentences when synthesis returns no playable audio.
+- The playback hook uses explicit lifecycle states: `idle`, `loading`, `playing`, `paused`, and `error`.
 
 ### GPU acceleration
 
@@ -126,7 +128,8 @@ Implementation highlights:
 
 - `findFirstSentenceIndexForPage(...)` deterministically locates the first sentence for a page.
 - `resolvePlaybackPosition(...)` safely clamps restored progress if the saved page or sentence no longer aligns with the current document.
-- `resetPlaybackRuntime(...)` centralizes pause, source clearing, and cache cleanup so page jumps do not leave overlapping playback behind.
+- `resetPlaybackRuntime(...)` centralizes pause and cache cleanup so page jumps do not leave overlapping playback behind or transient empty-source media errors.
+- Audio event listeners are attached once per mounted `Audio()` instance and removed exactly once during cleanup.
 
 ### `DocumentReader`
 

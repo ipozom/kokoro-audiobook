@@ -2,6 +2,7 @@ import type { SentenceChunk, SynthesisQueueItem, SynthesisQueueRequest } from ".
 import { serverConfig } from "../config.js";
 import { RETRY_TTS_MAX_CHARS, SAFE_TTS_MAX_CHARS, normalizeTtsText, splitTextForTts } from "../utils/text.js";
 import { HttpError } from "../utils/errors.js";
+import { logger } from "../utils/logger.js";
 
 interface PythonSynthesisResponse {
   items: Array<{
@@ -35,14 +36,11 @@ export async function synthesizeSentences(request: SynthesisQueueRequest): Promi
   try {
     return await requestPythonSynthesis({ ...request, sentences: sanitizedSentences }, "batch");
   } catch (error) {
-    console.warn(
-      "[ttsClient] batch synthesis failed, retrying sentence-by-sentence",
-      JSON.stringify({
-        error: error instanceof Error ? error.message : String(error),
-        chunkCount: sanitizedSentences.length,
-        textLengths: sanitizedSentences.map((sentence) => sentence.text.length)
-      })
-    );
+    logger.warn("TTS_BATCH_RETRY", {
+      error: error instanceof Error ? error.message : String(error),
+      chunkCount: sanitizedSentences.length,
+      textLengths: sanitizedSentences.map((sentence) => sentence.text.length)
+    });
   }
 
   const recoveredItems: SynthesisQueueItem[] = [];
@@ -63,14 +61,11 @@ export async function getTtsHealth(): Promise<unknown> {
     headers: { "X-API-Key": serverConfig.pythonTtsApiKey }
   });
 
-  console.info(
-    "[ttsClient] python health response",
-    JSON.stringify({
-      status: response.status,
-      ok: response.ok,
-      latencyMs: Math.round((performance.now() - startedAt) * 100) / 100
-    })
-  );
+  logger.info("PYTHON_HEALTH_RESPONSE", {
+    status: response.status,
+    ok: response.ok,
+    latencyMs: Math.round((performance.now() - startedAt) * 100) / 100
+  });
 
   if (!response.ok) {
     throw new HttpError("Python TTS health check failed", 502, await safeJson(response));
@@ -95,18 +90,15 @@ async function requestPythonSynthesis(request: SynthesisQueueRequest, mode: stri
     text: sentence.text
   }));
 
-  console.info(
-    "[ttsClient] forwarding synthesis request",
-    JSON.stringify({
-      mode,
-      pythonUrl: `${serverConfig.pythonTtsUrl}/synthesize`,
-      voice: request.voice,
-      speed: request.speed,
-      chunkCount: chunks.length,
-      textLengths: chunks.map((chunk) => chunk.text.length),
-      maxChunkChars: Math.max(...chunks.map((chunk) => chunk.text.length))
-    })
-  );
+  logger.info("TTS_REQUEST", {
+    mode,
+    pythonUrl: `${serverConfig.pythonTtsUrl}/synthesize`,
+    voice: request.voice,
+    speed: request.speed,
+    chunkCount: chunks.length,
+    textLengths: chunks.map((chunk) => chunk.text.length),
+    maxChunkChars: Math.max(...chunks.map((chunk) => chunk.text.length))
+  });
 
   const response = await fetch(`${serverConfig.pythonTtsUrl}/synthesize`, {
     method: "POST",
@@ -122,17 +114,14 @@ async function requestPythonSynthesis(request: SynthesisQueueRequest, mode: stri
   });
 
   const latencyMs = Math.round((performance.now() - startedAt) * 100) / 100;
-  console.info(
-    "[ttsClient] python synthesis response",
-    JSON.stringify({
-      mode,
-      status: response.status,
-      ok: response.ok,
-      latencyMs,
-      chunkCount: chunks.length,
-      textLengths: chunks.map((chunk) => chunk.text.length)
-    })
-  );
+  logger.info("PYTHON_SYNTHESIS_RESPONSE", {
+    mode,
+    status: response.status,
+    ok: response.ok,
+    latencyMs,
+    chunkCount: chunks.length,
+    textLengths: chunks.map((chunk) => chunk.text.length)
+  });
 
   if (!response.ok) {
     throw new HttpError("Python TTS service rejected the synthesis request", 502, {
@@ -142,7 +131,7 @@ async function requestPythonSynthesis(request: SynthesisQueueRequest, mode: stri
   }
 
   const payload = (await response.json()) as PythonSynthesisResponse;
-  console.log("[DEBUG BACKEND] TTS RESPONSE:", {
+  logger.info("TTS_RESPONSE", {
     requested: request.sentences.length,
     returned: payload.items.length,
     sentenceIndexes: payload.items.map((item) => item.sentence_index)
@@ -161,29 +150,23 @@ async function synthesizeWithFallback(sentence: SentenceChunk, voice: string, sp
     const [item] = await requestPythonSynthesis({ voice, speed, sentences: [sentence] }, "single-retry");
     return item ?? null;
   } catch (error) {
-    console.warn(
-      "[ttsClient] single sentence retry failed, trying smaller fragments",
-      JSON.stringify({
-        chunkId: sentence.id,
-        sentenceIndex: sentence.sentenceIndex,
-        textLength: sentence.text.length,
-        preview: summarizeText(sentence.text),
-        error: error instanceof Error ? error.message : String(error)
-      })
-    );
+    logger.warn("TTS_SINGLE_RETRY_FAILED", {
+      chunkId: sentence.id,
+      sentenceIndex: sentence.sentenceIndex,
+      textLength: sentence.text.length,
+      preview: summarizeText(sentence.text),
+      error: error instanceof Error ? error.message : String(error)
+    });
   }
 
   const retryFragments = splitTextForTts(sentence.text, Math.min(RETRY_TTS_MAX_CHARS, SAFE_TTS_MAX_CHARS));
   if (retryFragments.length <= 1) {
-    console.error(
-      "[ttsClient] skipping failed sentence after retry exhaustion",
-      JSON.stringify({
-        chunkId: sentence.id,
-        sentenceIndex: sentence.sentenceIndex,
-        textLength: sentence.text.length,
-        preview: summarizeText(sentence.text)
-      })
-    );
+    logger.error("TTS_SENTENCE_SKIPPED_RETRY_EXHAUSTED", {
+      chunkId: sentence.id,
+      sentenceIndex: sentence.sentenceIndex,
+      textLength: sentence.text.length,
+      preview: summarizeText(sentence.text)
+    });
     return null;
   }
 
@@ -214,17 +197,14 @@ async function synthesizeWithFallback(sentence: SentenceChunk, voice: string, sp
 
     return combineSynthesisItems(sentence, fragmentItems);
   } catch (error) {
-    console.error(
-      "[ttsClient] skipping failed sentence after fragment retry",
-      JSON.stringify({
-        chunkId: sentence.id,
-        sentenceIndex: sentence.sentenceIndex,
-        textLength: sentence.text.length,
-        fragmentCount: retryFragments.length,
-        preview: summarizeText(sentence.text),
-        error: error instanceof Error ? error.message : String(error)
-      })
-    );
+    logger.error("TTS_SENTENCE_SKIPPED_FRAGMENT_RETRY", {
+      chunkId: sentence.id,
+      sentenceIndex: sentence.sentenceIndex,
+      textLength: sentence.text.length,
+      fragmentCount: retryFragments.length,
+      preview: summarizeText(sentence.text),
+      error: error instanceof Error ? error.message : String(error)
+    });
     return null;
   }
 }
@@ -243,15 +223,12 @@ function combineSynthesisItems(sentence: SentenceChunk, fragments: SynthesisQueu
   const combinedWav = encodeWav(base.sampleRate, base.numChannels, base.bitsPerSample, combinedData);
   const totalDurationMs = fragments.reduce((sum, fragment) => sum + fragment.durationMs, 0);
 
-  console.info(
-    "[ttsClient] fragment retry succeeded",
-    JSON.stringify({
-      chunkId: sentence.id,
-      sentenceIndex: sentence.sentenceIndex,
-      fragmentCount: fragments.length,
-      totalDurationMs
-    })
-  );
+  logger.info("TTS_FRAGMENT_RETRY_SUCCEEDED", {
+    chunkId: sentence.id,
+    sentenceIndex: sentence.sentenceIndex,
+    fragmentCount: fragments.length,
+    totalDurationMs
+  });
 
   return {
     chunkId: sentence.id,

@@ -21,6 +21,8 @@ See [docs/architecture.md](docs/architecture.md) for the detailed architecture a
 - Browser playback from WAV `Blob` object URLs.
 - Progress persistence by content-derived `documentId`.
 - Start playback from any valid page.
+- Deterministic sentence-order queue progression with skip-on-failure fallback.
+- Structured runtime logging in the frontend and Node TTS boundary.
 
 ## Project Structure
 
@@ -58,7 +60,19 @@ Runtime path:
 6. Node authenticates to the Python service and forwards the synthesis batch.
 7. Python synthesizes WAV audio with Kokoro-82M on the GPU.
 8. The frontend converts base64 WAV into `Blob` URLs and plays them through an off-DOM `Audio()` element.
-9. Progress is saved to `PUT /api/progress/:documentId` and restored on reload.
+9. The playback hook advances strictly by document sentence order, skipping only sentences that failed to synthesize.
+10. Progress is saved to `PUT /api/progress/:documentId` and restored on reload.
+
+## Playback Lifecycle
+
+The frontend queue uses explicit runtime states: `idle`, `loading`, `playing`, `paused`, and `error`.
+
+- `loading`: current sentence is being synthesized or hydrated from cache.
+- `playing`: the off-DOM `Audio()` instance has a valid `Blob` URL and playback has started.
+- `paused`: playback was user-paused, stopped at the end of the document, or restored from saved progress.
+- `error`: synthesis or media playback failed for the current sentence.
+
+Queue progression is document-order based rather than array-index arithmetic. When a sentence cannot be played, the hook searches forward, synthesizes the next window if needed, and skips only sentences that returned no playable audio.
 
 ## Setup
 
@@ -172,6 +186,7 @@ npm run dev
 3. Use `Start from page` on page 1, a middle page, and the last page.
 4. Confirm the viewer page, transcript pane, and audio all restart from the selected page.
 5. Reload the page and confirm progress restores to a valid position.
+6. Verify long or malformed trailing pages continue past skipped sentences instead of stopping silently.
 
 ### Automated checks
 
@@ -200,7 +215,7 @@ python3 -m py_compile app/*.py
 
 - Confirm the Python service and Node API are both running.
 - Check `GET /api/tts/health` and confirm CUDA is available.
-- Open the browser console and confirm audio playback logs do not show `[audio] playback failed`.
+- Open the browser console and confirm structured `[audio]` logs do not show playback failures for the active sentence.
 
 ### PDF not rendering
 
