@@ -1,16 +1,28 @@
 # Kokoro Audiobook PDF Audio Player
 
-Local PDF-to-audiobook player built with React, Node.js, and a CUDA-backed Python Kokoro-82M service. The stack uploads and parses PDFs, extracts sentence chunks, synthesizes speech locally on an NVIDIA GTX 1080 Ti, highlights the currently spoken sentence, and restores playback progress across reloads.
+Local PDF-to-audiobook player built with React, Node.js, and a CUDA-backed Python Kokoro-82M service. The system uploads PDFs, extracts page-aware sentences, synthesizes audio locally on an NVIDIA GTX 1080 Ti, keeps playback synchronized with the rendered PDF, restores progress, and now supports starting playback from any valid page.
 
-## 1. Architecture Overview
+## Overview
 
-See [docs/architecture.md](docs/architecture.md) for the full design. In short:
+The stack is split into three runtime layers:
 
-- `frontend/`: React + TypeScript + Tailwind UI, PDF rendering, playback orchestration, transcript highlighting.
-- `server/`: Express API, secure PDF ingestion, extraction, segmentation, progress persistence, Python service proxy.
-- `python-service/`: FastAPI Kokoro wrapper, CUDA checks, warm-up, bounded batch inference, WAV output.
+- `frontend/`: React + TypeScript UI for PDF rendering, transcript navigation, transport controls, and page-based playback starts.
+- `server/`: Express API for PDF validation, extraction, sentence segmentation, progress persistence, and Python service proxying.
+- `python-service/`: FastAPI service that loads Kokoro-82M, verifies CUDA, runs synthesis on `cuda:0`, and returns WAV chunks.
 
-## 2. Project Structure
+See [docs/architecture.md](docs/architecture.md) for the detailed architecture and [docs/security-performance.md](docs/security-performance.md) for security and performance notes.
+
+## Features
+
+- PDF upload and validation through the Node API.
+- Server-side text extraction with page-aware sentence segmentation.
+- Synchronized PDF canvas rendering and transcript highlighting.
+- Local Kokoro-82M speech synthesis on CUDA.
+- Browser playback from WAV `Blob` object URLs.
+- Progress persistence by content-derived `documentId`.
+- Start playback from any valid page.
+
+## Project Structure
 
 ```text
 kokoro-audiobook/
@@ -23,45 +35,46 @@ kokoro-audiobook/
 │   │   ├── hooks/
 │   │   ├── lib/
 │   │   └── types.ts
-│   ├── package.json
-│   └── vite.config.ts
+│   └── package.json
 ├── python-service/
 │   ├── app/
-│   │   ├── config.py
-│   │   ├── kokoro_adapter.py
-│   │   ├── main.py
-│   │   ├── schemas.py
-│   │   └── tts_engine.py
 │   └── requirements.txt
 ├── server/
 │   ├── src/
-│   │   ├── routes/
-│   │   ├── services/
-│   │   ├── utils/
-│   │   └── types.ts
 │   ├── tests/
 │   └── package.json
 └── README.md
 ```
 
-## 3. Step-by-Step Implementation
+## Architecture and Data Flow
 
-1. The frontend uploads a PDF to the Node API.
-2. The Node API validates the file and parses text with pdf.js.
-3. Extracted text is normalized and segmented into sentence chunks with page metadata.
-4. A deterministic `documentId` is generated from the PDF content hash.
-5. The frontend renders the PDF page and transcript list.
-6. On playback, the frontend requests a short sentence window from `/api/tts/queue`.
-7. The Node API forwards the request to the Python service with the internal API key.
-8. The Python service synthesizes WAV audio using Kokoro-82M on CUDA.
-9. The browser plays the returned WAV chunks sequentially and highlights the active sentence.
-10. Current page, sentence index, state, and speed are persisted and restored by `documentId`.
+Runtime path:
 
-## 4. Python Kokoro-82M GPU Service
+1. The browser uploads a PDF to `POST /api/documents/upload`.
+2. Node validates the file and extracts text with pdf.js.
+3. Node normalizes the text and emits sentence chunks with `pageNumber` and `sentenceIndex`.
+4. The frontend renders the current PDF page and transcript for that page.
+5. Playback requests small sentence windows from `POST /api/tts/queue`.
+6. Node authenticates to the Python service and forwards the synthesis batch.
+7. Python synthesizes WAV audio with Kokoro-82M on the GPU.
+8. The frontend converts base64 WAV into `Blob` URLs and plays them through an off-DOM `Audio()` element.
+9. Progress is saved to `PUT /api/progress/:documentId` and restored on reload.
 
-The full service lives in [python-service/app/main.py](python-service/app/main.py), [python-service/app/tts_engine.py](python-service/app/tts_engine.py), and [python-service/app/kokoro_adapter.py](python-service/app/kokoro_adapter.py).
+## Setup
 
-### Python environment setup
+### Node.js
+
+```bash
+npm install
+cp server/.env.example server/.env
+```
+
+Set at least:
+
+- `PYTHON_TTS_URL=http://127.0.0.1:8001`
+- `PYTHON_TTS_API_KEY=local-dev-key`
+
+### Python
 
 ```bash
 cd python-service
@@ -72,9 +85,9 @@ pip install -r requirements.txt
 cp .env.example .env
 ```
 
-### CUDA + PyTorch setup
+### CUDA / PyTorch
 
-Install a CUDA-enabled PyTorch build appropriate for your local driver and CUDA runtime. Example for CUDA 12.1 wheels:
+Install a CUDA-enabled PyTorch build that matches your local driver. Example:
 
 ```bash
 pip install --upgrade torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
@@ -90,137 +103,83 @@ print(torch.cuda.get_device_name(0) if torch.cuda.is_available() else "no-cuda")
 PY
 ```
 
-### Kokoro setup
+### Kokoro Runtime
 
-Install your local Kokoro runtime package and place model files at the configured path:
+The current implementation is validated against Kokoro-82M with local or Hugging Face cached assets. If needed, configure the runtime through `python-service/.env`:
 
-```bash
-pip install kokoro
-mkdir -p models/kokoro-82m
-```
-
-If your Kokoro package uses a different import path or constructor, update these variables in `.env`:
-
-- `KOKORO_MODULE`
-- `KOKORO_FACTORY`
+- `KOKORO_REPO_ID`
+- `KOKORO_CONFIG_PATH`
 - `KOKORO_MODEL_PATH`
+- `KOKORO_VOICE_PATH`
+- `API_KEY`
 
-### Run the Python service
+## Run Instructions
+
+Start the Python service:
 
 ```bash
 cd python-service
 source .venv/bin/activate
-uvicorn app.main:app --host 0.0.0.0 --port 8001
+uvicorn app.main:app --host 127.0.0.1 --port 8001
 ```
 
-### How GPU is utilized
-
-- The service requires CUDA by default via `REQUIRE_CUDA=true`.
-- `TTSEngine` selects `cuda:0`, warms the model, synchronizes batches, and reports VRAM usage from PyTorch.
-- Each synthesis batch is bounded to reduce VRAM spikes on the GTX 1080 Ti.
-
-## 5. Node.js API Layer
-
-The API entrypoint is [server/src/server.ts](server/src/server.ts), and the app composition is in [server/src/app.ts](server/src/app.ts).
-
-### Install and configure
-
-```bash
-npm install
-cp server/.env.example server/.env
-```
-
-Important server environment values:
-
-- `PYTHON_TTS_URL`: URL of the local Python service.
-- `PYTHON_TTS_API_KEY`: must match `API_KEY` in `python-service/.env`.
-- `MAX_PDF_BYTES`: upload size cap.
-- `MAX_PDF_PAGES`: extraction cap for large documents.
-
-### Run the API
+Start the Node API:
 
 ```bash
 npm run dev:server
 ```
 
-### API surface
-
-- `POST /api/documents/upload`: validate and parse a PDF.
-- `GET /api/progress/:documentId`: restore saved progress.
-- `PUT /api/progress/:documentId`: persist playback state.
-- `POST /api/tts/queue`: request audio for sentence chunks.
-- `GET /api/tts/health`: surface Python CUDA health.
-
-## 6. React Frontend
-
-The app root is [frontend/src/App.tsx](frontend/src/App.tsx). Playback orchestration lives in [frontend/src/hooks/useAudioQueue.ts](frontend/src/hooks/useAudioQueue.ts).
-
-### Run the frontend
+Start the frontend:
 
 ```bash
 npm run dev:frontend
 ```
 
-Or run both frontend and API together:
+Or run the workspace dev workflow if your root scripts provide it:
 
 ```bash
 npm run dev
 ```
 
-### Frontend behavior
+## Usage
 
-- Uploads PDFs through drag-and-drop or file chooser.
-- Renders the active PDF page to canvas using pdf.js.
-- Mirrors page-level sentence chunks in a transcript pane.
-- Requests and buffers upcoming sentence audio.
-- Highlights the active sentence and lets the user click any sentence to seek.
-- Restores playback page, sentence index, and speed from saved progress.
+### Upload PDF
 
-## 7. README Requirements Coverage
+1. Open the frontend.
+2. Drop a PDF or click `Select PDF`.
+3. Wait for the PDF page and transcript to appear.
 
-This README covers:
+### Start Playback
 
-- Node.js setup
-- Python environment setup
-- CUDA + PyTorch installation guidance
-- Local Kokoro wrapper assumptions
-- GPU utilization behavior
-- Operational troubleshooting
+1. Click `Play`.
+2. The current sentence is synthesized if needed.
+3. The transcript highlight advances as audio plays.
 
-## 8. Security and Performance Documentation
+### Start from Page
 
-See [docs/security-performance.md](docs/security-performance.md).
+1. Enter a page number in the `Start page` input inside the PDF reader header.
+2. Click `Start from page`.
+3. The viewer jumps immediately to that page.
+4. If the page contains sentences, playback restarts from the first sentence on that page.
+5. If the page has no extracted sentences, playback stops and the app shows a non-fatal message.
 
-Implemented mitigations include:
+## Testing Instructions
 
-- strict PDF validation
-- disabled eval-style PDF parsing behavior
-- sanitized extracted text
-- authenticated Python service endpoints
-- no shell-based IPC between Node and Python
-- bounded chunk sizes and bounded batch counts for GPU stability
+### Functional checks
 
-## 9. Testing Instructions
+1. Upload a multi-page PDF.
+2. Start playback and confirm transcript highlighting advances.
+3. Use `Start from page` on page 1, a middle page, and the last page.
+4. Confirm the viewer page, transcript pane, and audio all restart from the selected page.
+5. Reload the page and confirm progress restores to a valid position.
 
-### Functional tests
+### Automated checks
 
-1. Start the Python service.
-2. Start the Node API.
-3. Start the frontend.
-4. Upload a valid PDF.
-5. Confirm the PDF page renders and the transcript appears.
-6. Press Play and confirm audio starts.
-7. Press Pause and resume.
-8. Reload the browser and confirm progress restores.
+Frontend build:
 
-### GPU tests
-
-1. Call `GET /api/tts/health` and confirm `cuda_available` is `true`.
-2. Confirm `device_name` reports your GTX 1080 Ti.
-3. Watch `vram_allocated_mb` while starting playback.
-4. Test a larger PDF and verify uploads still respect configured caps.
-
-### Local automated checks
+```bash
+npm run build --workspace frontend
+```
 
 Server tests:
 
@@ -235,29 +194,30 @@ cd python-service
 python3 -m py_compile app/*.py
 ```
 
-Frontend type check and build:
+## Troubleshooting
 
-```bash
-npm run build --workspace frontend
-```
+### No audio
 
-## Troubleshooting GPU Issues
+- Confirm the Python service and Node API are both running.
+- Check `GET /api/tts/health` and confirm CUDA is available.
+- Open the browser console and confirm audio playback logs do not show `[audio] playback failed`.
 
-### `torch.cuda.is_available()` is false
+### PDF not rendering
 
-- Confirm NVIDIA drivers are installed.
-- Confirm your PyTorch build is CUDA-enabled.
-- Confirm the Python environment is the one you used to install CUDA wheels.
+- Confirm the frontend can load the configured pdf.js worker URL.
+- Check the browser console for `[pdf] render failed` messages.
+- Retry with a known-good PDF to rule out malformed input.
 
-### Python service fails at startup with CUDA required
+### GPU issues
 
-- Set `REQUIRE_CUDA=false` only for diagnostics, not for normal operation.
-- Verify `nvidia-smi` works on the host.
+- Confirm `torch.cuda.is_available()` is `true`.
+- Confirm `nvidia-smi` works on the host.
+- Confirm the installed PyTorch build is CUDA-enabled.
 
-### Kokoro import or factory mismatch
+### Page without sentences
 
-- Update `KOKORO_MODULE` and `KOKORO_FACTORY`.
-- Adjust [python-service/app/kokoro_adapter.py](python-service/app/kokoro_adapter.py) if your local runtime uses another method signature.
+- Some PDF pages can render visually but extract no clean text.
+- The viewer still jumps to the page, but playback will not start until a page with extracted sentences is selected.
 
 ### VRAM pressure or out-of-memory errors
 

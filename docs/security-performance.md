@@ -2,67 +2,106 @@
 
 ## Input Validation Strategy
 
-- PDFs are accepted only through multipart upload with in-memory storage.
-- The Node boundary validates MIME type, byte size, PDF header signature, and page count before extraction.
-- Server-side extraction uses pdf.js with `isEvalSupported: false` and `stopAtErrors: true` to reduce script execution and malformed-document tolerance.
-- Extracted text is normalized to remove control characters and collapse suspicious whitespace before it reaches the UI or TTS service.
+### PDF upload
 
-## Attack Surface and Mitigations
+- PDFs are accepted only through the Node upload route.
+- The API validates MIME type, byte size, PDF signature, and page count before extraction.
+- Server-side extraction uses pdf.js with hardened parsing options.
 
-### PDF parsing
+### Page input for `Start from page`
 
-- Risk: malformed or hostile PDFs targeting parser behavior.
-- Mitigation: strict file checks, page-count caps, error-on-parse, no arbitrary file execution, no external helper binaries.
+- The page selector is a controlled numeric input.
+- The button is disabled until the value is an integer in the inclusive range `1..pageCount`.
+- The queue hook clamps the page again before using it, so malformed UI state cannot produce an out-of-range playback start.
 
-### UI rendering
+This means the feature validates input both at the UI boundary and again at the playback state boundary.
 
-- Risk: XSS from extracted text.
-- Mitigation: React escapes transcript text by default, and the app never injects PDF text through `dangerouslySetInnerHTML`.
+## API Boundaries
 
-### Python service exposure
+### Browser -> Node
 
-- Risk: direct local abuse of the TTS process.
-- Mitigation: `X-API-Key` is required for every Python endpoint, and the browser never talks to Python directly.
+- The browser never talks directly to the Python service.
+- All PDFs, progress updates, and TTS queue requests pass through Node.
 
-### IPC and service-to-service calls
+### Node -> Python
 
-- Risk: arbitrary code or shell execution through inter-process boundaries.
-- Mitigation: Node communicates with Python over fixed HTTP endpoints only. No shelling out, no untrusted command construction, no executable uploads.
+- Node forwards only fixed-schema TTS requests.
+- The Python service requires `X-API-Key` on every request.
+- No shell commands or subprocess boundaries are involved in synthesis orchestration.
 
-### File persistence
+## PDF Parsing Safety
 
-- Risk: path traversal and arbitrary write locations.
-- Mitigation: progress files are keyed only by SHA-256 content hash and stored under a fixed data directory.
+- pdf.js parsing is isolated to the Node layer.
+- Hostile or malformed PDFs are rejected early when possible.
+- Extracted text is normalized before it reaches the browser or the TTS layer.
 
-## Additional Security Guidance
+## XSS Mitigation
 
-- Bind the Python service to loopback if the stack is used on a shared machine.
-- Replace the default API key before first use.
-- Keep PDF size and page-count caps conservative if untrusted inputs are expected.
+- Transcript text is rendered through normal React text nodes.
+- The app never uses `dangerouslySetInnerHTML` for PDF-derived content.
+- The new page-selection UI accepts only numeric input and does not inject user-provided markup anywhere.
+
+## File Persistence Safety
+
+- Progress files are keyed by content hash, not user-provided filenames.
+- Writes occur under a fixed data directory.
+- The new page-start feature does not add any new persisted fields or file-system access patterns.
 
 # Performance Notes
 
-## GPU Utilization Strategy
+## GPU Usage on GTX 1080 Ti
 
-- CUDA is required by default because the primary objective is local GPU inference on the GTX 1080 Ti.
-- The model is warmed at startup to avoid a slow first playback request.
-- Request batches are bounded to 8 chunks and each chunk is capped at 700 characters to fit typical 11 GB VRAM limits with headroom.
-- The engine serializes inference with a mutex to prevent overlapping GPU workloads from causing latency spikes or out-of-memory failures.
+- Kokoro-82M runs on `cuda:0`.
+- Health checks expose device name and VRAM usage.
+- The Python service warms the model at startup to avoid the worst first-request latency.
 
-## Bottlenecks and Tradeoffs
+## Chunking Strategy
 
-- PDF extraction is CPU-bound and front-loaded during upload.
-- TTS is GPU-bound and optimized for steady interactive playback, not maximum offline throughput.
-- Base64 WAV transport is simple and browser-friendly but larger than a binary streaming protocol. The implementation chooses stability and debuggability over transport efficiency.
-- Sentence-level synchronization is deterministic but coarse compared to phoneme-level alignment.
+- The frontend requests only a small synthesis window ahead of the current sentence.
+- Node forwards bounded sentence batches.
+- Python synthesizes those chunks and returns WAV payloads sized for interactive playback rather than bulk export.
 
-## GTX 1080 Ti Notes
+## Audio Latency
 
-- Approximate VRAM capacity is 11 GB; the service reports total, reserved, and allocated memory on health checks.
-- If VRAM pressure appears, reduce `MAX_BATCH_ITEMS` and `MAX_TEXT_CHARS` first.
-- If startup latency is acceptable but throughput is low, consider slightly larger batches only after measuring memory headroom.
+- The first warm request is the slowest because kernels and runtime caches are established.
+- Normal playback requests are smaller and benefit from the prefetch window.
+- Page jumps remain efficient because the frontend does not rebuild document data. It only clears stale audio URLs and resumes buffering from the new sentence index.
 
-## Memory Cleanup Strategy
+## Queue Efficiency After Page Jump
 
-- The engine calls `torch.cuda.empty_cache()` after each batch.
-- This does not free allocated tensors still in use, but it does reduce fragmentation pressure from cached blocks between requests.
+The `Start from page` feature is intentionally implemented without backend changes.
+
+Efficiency details:
+
+- The frontend computes the first sentence index for the selected page locally.
+- Existing sentence metadata is reused instead of requesting a new filtered document.
+- Cached audio object URLs are revoked on page jump so no stale audio remains.
+- After the reset, buffering resumes from the new index using the same small prefetch window.
+
+## Bottlenecks and Mitigation
+
+### PDF extraction
+
+- CPU-bound during upload.
+- Mitigation: do it once per upload and reuse the returned sentence model.
+
+### TTS inference
+
+- GPU-bound.
+- Mitigation: warmup, bounded batch sizes, serialized inference.
+
+### Browser audio transport
+
+- Base64 WAV is larger than binary streaming.
+- Mitigation: small queue windows and `Blob` URL reuse only for the sentences needed next.
+
+## Memory Cleanup
+
+### Frontend
+
+- Audio chunks are stored as `Blob` object URLs.
+- When the document changes or the user starts from a new page, those URLs are revoked to avoid memory leaks.
+
+### Python
+
+- The TTS engine calls `torch.cuda.empty_cache()` after batches to reduce cache fragmentation pressure.

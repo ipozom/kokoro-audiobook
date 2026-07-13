@@ -18,6 +18,7 @@ interface UseAudioQueueResult extends AudioQueueState {
   stop(): void;
   seekSentence(index: number): void;
   skip(delta: number): void;
+  startFromPage(pageNumber: number): Promise<void>;
   setPlaybackRate(rate: number): void;
 }
 
@@ -40,6 +41,10 @@ export function useAudioQueue(document: ParsedDocument | null, initialProgress: 
     error: null
   });
 
+  function resetRuntime(clearCache: boolean): void {
+    resetPlaybackRuntime(clearCache, audioRef.current, cacheRef.current, durationsRef.current);
+  }
+
   useEffect(() => {
     documentRef.current = document;
   }, [document]);
@@ -51,12 +56,8 @@ export function useAudioQueue(document: ParsedDocument | null, initialProgress: 
 
   useEffect(() => {
     if (!document) {
-      cacheRef.current.clear();
-      durationsRef.current.clear();
-      if (audioRef.current) {
-        audioRef.current.pause();
-        audioRef.current.src = "";
-      }
+      resetRuntime(true);
+      sentenceIndexRef.current = 0;
       setState({
         currentSentenceIndex: 0,
         currentPage: 1,
@@ -68,9 +69,12 @@ export function useAudioQueue(document: ParsedDocument | null, initialProgress: 
       return;
     }
 
+    const restoredPosition = resolvePlaybackPosition(document, initialProgress);
+    sentenceIndexRef.current = restoredPosition.sentenceIndex;
+    playbackRateRef.current = initialProgress?.speed ?? 1;
     setState({
-      currentSentenceIndex: initialProgress?.sentenceIndex ?? 0,
-      currentPage: initialProgress?.currentPage ?? document.sentences[0]?.pageNumber ?? 1,
+      currentSentenceIndex: restoredPosition.sentenceIndex,
+      currentPage: restoredPosition.pageNumber,
       isPlaying: false,
       isLoading: false,
       playbackRate: initialProgress?.speed ?? 1,
@@ -84,37 +88,46 @@ export function useAudioQueue(document: ParsedDocument | null, initialProgress: 
       return;
     }
 
+    console.info("[audio] playback ended", {
+      sentenceIndex: sentenceIndexRef.current
+    });
+
     const nextIndex = sentenceIndexRef.current + 1;
     if (nextIndex >= activeDocument.sentences.length) {
       setState((current) => ({ ...current, isPlaying: false }));
       return;
     }
 
-    const nextSentence = activeDocument.sentences[nextIndex];
-    sentenceIndexRef.current = nextIndex;
-    setState((current) => ({
-      ...current,
-      currentSentenceIndex: nextIndex,
-      currentPage: nextSentence.pageNumber,
-      isPlaying: false
-    }));
-
-    void play();
+    void playSentenceAt(nextIndex);
   });
 
   useEffect(() => {
     if (!audioRef.current) {
       audioRef.current = new Audio();
+      audioRef.current.volume = 1;
+      audioRef.current.muted = false;
       audioRef.current.addEventListener("ended", handleEnded);
+      audioRef.current.addEventListener("play", handlePlay);
+      audioRef.current.addEventListener("error", handleError);
+    }
+
+    if (typeof window !== "undefined") {
+      window.__kokoroAudio = audioRef.current;
     }
 
     return () => {
       if (audioRef.current) {
         audioRef.current.removeEventListener("ended", handleEnded);
+        audioRef.current.removeEventListener("play", handlePlay);
+        audioRef.current.removeEventListener("error", handleError);
         audioRef.current.pause();
       }
+      if (typeof window !== "undefined") {
+        delete window.__kokoroAudio;
+      }
+      revokeCachedAudioUrls(cacheRef.current);
     };
-  }, [handleEnded]);
+  }, []);
 
   useEffect(() => {
     if (!document) {
@@ -124,49 +137,25 @@ export function useAudioQueue(document: ParsedDocument | null, initialProgress: 
     void persistProgress(document, state);
   }, [document, state.currentPage, state.currentSentenceIndex, state.isPlaying, state.playbackRate]);
 
+  const handlePlay = useEffectEvent(() => {
+    console.info("[audio] playback started", {
+      sentenceIndex: sentenceIndexRef.current,
+      playbackRate: playbackRateRef.current
+    });
+  });
+
+  const handleError = useEffectEvent(() => {
+    const audio = audioRef.current;
+    const message = audio?.error?.message ?? `media error code ${audio?.error?.code ?? "unknown"}`;
+    console.error("[audio] playback failed", {
+      sentenceIndex: sentenceIndexRef.current,
+      message
+    });
+    setState((current) => ({ ...current, isPlaying: false, isLoading: false, error: message }));
+  });
+
   async function play(): Promise<void> {
-    if (!document) {
-      return;
-    }
-
-    const sentence = document.sentences[state.currentSentenceIndex];
-    if (!sentence) {
-      return;
-    }
-
-    setState((current) => ({ ...current, isLoading: true, error: null }));
-
-    try {
-      await ensureBuffered(document, state.currentSentenceIndex, state.playbackRate);
-      const src = cacheRef.current.get(state.currentSentenceIndex);
-      if (!src) {
-        throw new Error("Audio cache miss");
-      }
-
-      const audio = audioRef.current;
-      if (!audio) {
-        throw new Error("Audio element unavailable");
-      }
-
-      audio.src = src;
-      audio.playbackRate = state.playbackRate;
-      await audio.play();
-
-      setState((current) => ({
-        ...current,
-        currentPage: sentence.pageNumber,
-        isPlaying: true,
-        isLoading: false
-      }));
-      void ensureBuffered(document, state.currentSentenceIndex + 1, state.playbackRate);
-    } catch (error) {
-      setState((current) => ({
-        ...current,
-        isPlaying: false,
-        isLoading: false,
-        error: error instanceof Error ? error.message : "Playback failed"
-      }));
-    }
+    await playSentenceAt(sentenceIndexRef.current);
   }
 
   function pause(): void {
@@ -175,11 +164,18 @@ export function useAudioQueue(document: ParsedDocument | null, initialProgress: 
   }
 
   function stop(): void {
-    if (audioRef.current) {
-      audioRef.current.pause();
-      audioRef.current.currentTime = 0;
-    }
-    setState((current) => ({ ...current, isPlaying: false, currentSentenceIndex: 0, currentPage: 1 }));
+    const activeDocument = documentRef.current;
+    const firstSentence = activeDocument?.sentences[0];
+    resetRuntime(false);
+    sentenceIndexRef.current = firstSentence?.sentenceIndex ?? 0;
+    setState((current) => ({
+      ...current,
+      isPlaying: false,
+      isLoading: false,
+      currentSentenceIndex: firstSentence?.sentenceIndex ?? 0,
+      currentPage: firstSentence?.pageNumber ?? 1,
+      error: null
+    }));
   }
 
   function seekSentence(index: number): void {
@@ -189,17 +185,57 @@ export function useAudioQueue(document: ParsedDocument | null, initialProgress: 
 
     const clamped = Math.max(0, Math.min(index, document.sentences.length - 1));
     const sentence = document.sentences[clamped];
-    audioRef.current?.pause();
+    resetRuntime(false);
+    sentenceIndexRef.current = clamped;
     setState((current) => ({
       ...current,
       currentSentenceIndex: clamped,
       currentPage: sentence.pageNumber,
-      isPlaying: false
+      isPlaying: false,
+      isLoading: false,
+      error: null
     }));
   }
 
   function skip(delta: number): void {
     seekSentence(state.currentSentenceIndex + delta);
+  }
+
+  async function startFromPage(pageNumber: number): Promise<void> {
+    const activeDocument = documentRef.current;
+    if (!activeDocument) {
+      return;
+    }
+
+    const clampedPage = clampPageNumber(pageNumber, activeDocument.pageCount);
+    const firstSentenceIndex = findFirstSentenceIndexForPage(activeDocument.sentences, clampedPage);
+
+    resetRuntime(true);
+
+    if (firstSentenceIndex === null) {
+      sentenceIndexRef.current = -1;
+      setState((current) => ({
+        ...current,
+        currentSentenceIndex: -1,
+        currentPage: clampedPage,
+        isPlaying: false,
+        isLoading: false,
+        error: `Page ${clampedPage} has no readable sentences.`
+      }));
+      return;
+    }
+
+    sentenceIndexRef.current = firstSentenceIndex;
+    setState((current) => ({
+      ...current,
+      currentSentenceIndex: firstSentenceIndex,
+      currentPage: clampedPage,
+      isPlaying: false,
+      isLoading: true,
+      error: null
+    }));
+
+    await playSentenceAt(firstSentenceIndex);
   }
 
   function setPlaybackRate(rate: number): void {
@@ -229,7 +265,9 @@ export function useAudioQueue(document: ParsedDocument | null, initialProgress: 
 
   function hydrateCache(items: SynthesisQueueItem[]): void {
     for (const item of items) {
-      cacheRef.current.set(item.sentenceIndex, `data:audio/wav;base64,${item.audioBase64}`);
+      if (!cacheRef.current.has(item.sentenceIndex)) {
+        cacheRef.current.set(item.sentenceIndex, createAudioObjectUrl(item.audioBase64));
+      }
       durationsRef.current.set(item.sentenceIndex, item.durationMs);
     }
   }
@@ -241,8 +279,72 @@ export function useAudioQueue(document: ParsedDocument | null, initialProgress: 
     stop,
     seekSentence,
     skip,
+    startFromPage,
     setPlaybackRate
   };
+
+  async function playSentenceAt(index: number): Promise<void> {
+    const activeDocument = documentRef.current;
+    if (!activeDocument) {
+      return;
+    }
+
+    const sentence = activeDocument.sentences[index];
+    if (!sentence) {
+      setState((current) => ({
+        ...current,
+        isPlaying: false,
+        isLoading: false,
+        error: "Selected sentence is unavailable."
+      }));
+      return;
+    }
+
+    setState((current) => ({
+      ...current,
+      currentSentenceIndex: index,
+      currentPage: sentence.pageNumber,
+      isLoading: true,
+      error: null
+    }));
+
+    try {
+      await ensureBuffered(activeDocument, index, playbackRateRef.current);
+      const src = cacheRef.current.get(index);
+      if (!src) {
+        throw new Error("Audio cache miss");
+      }
+
+      const audio = audioRef.current;
+      if (!audio) {
+        throw new Error("Audio element unavailable");
+      }
+
+      audio.volume = 1;
+      audio.muted = false;
+      audio.src = src;
+      audio.playbackRate = playbackRateRef.current;
+      await audio.play();
+
+      sentenceIndexRef.current = index;
+      setState((current) => ({
+        ...current,
+        currentSentenceIndex: index,
+        currentPage: sentence.pageNumber,
+        isPlaying: true,
+        isLoading: false,
+        error: null
+      }));
+      void ensureBuffered(activeDocument, index + 1, playbackRateRef.current);
+    } catch (error) {
+      setState((current) => ({
+        ...current,
+        isPlaying: false,
+        isLoading: false,
+        error: error instanceof Error ? error.message : "Playback failed"
+      }));
+    }
+  }
 }
 
 async function persistProgress(document: ParsedDocument, state: AudioQueueState): Promise<void> {
@@ -254,4 +356,83 @@ async function persistProgress(document: ParsedDocument, state: AudioQueueState)
     speed: state.playbackRate,
     updatedAt: new Date().toISOString()
   });
+}
+
+function createAudioObjectUrl(audioBase64: string): string {
+  const binary = atob(audioBase64);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+
+  const blob = new Blob([bytes], { type: "audio/wav" });
+  const objectUrl = URL.createObjectURL(blob);
+  console.info("[audio] created wav object URL", { bytes: bytes.byteLength, objectUrl });
+  return objectUrl;
+}
+
+function findFirstSentenceIndexForPage(sentences: SentenceChunk[], pageNumber: number): number | null {
+  const match = sentences.find((sentence) => sentence.pageNumber === pageNumber);
+  return match?.sentenceIndex ?? null;
+}
+
+function clampPageNumber(pageNumber: number, totalPages: number): number {
+  return Math.min(Math.max(pageNumber, 1), Math.max(totalPages, 1));
+}
+
+function resolvePlaybackPosition(document: ParsedDocument, initialProgress: PlaybackProgress | null): { sentenceIndex: number; pageNumber: number } {
+  const firstSentence = document.sentences[0];
+  const fallback = {
+    sentenceIndex: firstSentence?.sentenceIndex ?? 0,
+    pageNumber: firstSentence?.pageNumber ?? 1
+  };
+
+  if (!initialProgress) {
+    return fallback;
+  }
+
+  const clampedPage = clampPageNumber(initialProgress.currentPage, document.pageCount);
+  const matchingSentence = document.sentences[initialProgress.sentenceIndex];
+  if (matchingSentence && matchingSentence.pageNumber === clampedPage) {
+    return {
+      sentenceIndex: matchingSentence.sentenceIndex,
+      pageNumber: clampedPage
+    };
+  }
+
+  const firstSentenceIndex = findFirstSentenceIndexForPage(document.sentences, clampedPage);
+  if (firstSentenceIndex !== null) {
+    return {
+      sentenceIndex: firstSentenceIndex,
+      pageNumber: clampedPage
+    };
+  }
+
+  return fallback;
+}
+
+function revokeCachedAudioUrls(cache: Map<number, string>): void {
+  for (const objectUrl of cache.values()) {
+    URL.revokeObjectURL(objectUrl);
+  }
+  cache.clear();
+}
+
+function resetPlaybackRuntime(clearCache: boolean, audio: HTMLAudioElement | null = null, cache?: Map<number, string>, durations?: Map<number, number>): void {
+  if (audio) {
+    audio.pause();
+    audio.currentTime = 0;
+    audio.src = "";
+  }
+
+  if (clearCache && cache && durations) {
+    revokeCachedAudioUrls(cache);
+    durations.clear();
+  }
+}
+
+declare global {
+  interface Window {
+    __kokoroAudio?: HTMLAudioElement | null;
+  }
 }

@@ -73,8 +73,10 @@ export function App() {
             <DocumentReader
               file={file}
               document={document}
+              currentPage={playback.currentPage}
               currentSentenceIndex={playback.currentSentenceIndex}
               onSentenceClick={playback.seekSentence}
+              onStartFromPage={(pageNumber) => void playback.startFromPage(pageNumber)}
             />
           </>
         )}
