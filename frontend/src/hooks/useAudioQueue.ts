@@ -88,18 +88,8 @@ export function useAudioQueue(document: ParsedDocument | null, initialProgress: 
       return;
     }
 
-    console.info("ENDED:", {
-      sentenceIndex: sentenceIndexRef.current
-    });
-
-    const currentPosition = findSentencePositionByIndex(activeDocument.sentences, sentenceIndexRef.current);
-    const nextPosition = currentPosition === null ? 0 : currentPosition + 1;
-    if (nextPosition >= activeDocument.sentences.length) {
-      setState((current) => ({ ...current, isPlaying: false }));
-      return;
-    }
-
-    void advanceToNextPlayableSentence(activeDocument.sentences[nextPosition].sentenceIndex, "audio-ended");
+    console.log("ENDED:", sentenceIndexRef.current);
+    void advanceToNextSentence(activeDocument, sentenceIndexRef.current);
   });
 
   useEffect(() => {
@@ -156,7 +146,7 @@ export function useAudioQueue(document: ParsedDocument | null, initialProgress: 
   });
 
   async function play(): Promise<void> {
-    await advanceToNextPlayableSentence(sentenceIndexRef.current, "play-request");
+    await playSentenceAt(sentenceIndexRef.current);
   }
 
   function pause(): void {
@@ -184,18 +174,13 @@ export function useAudioQueue(document: ParsedDocument | null, initialProgress: 
       return;
     }
 
-    const sentencePosition = findSentencePositionByIndex(document.sentences, index);
-    const clampedPosition = sentencePosition ?? 0;
-    const sentence = document.sentences[clampedPosition];
-    if (!sentence) {
-      return;
-    }
-
+    const clamped = Math.max(0, Math.min(index, document.sentences.length - 1));
+    const sentence = document.sentences[clamped];
     resetRuntime(false);
-    sentenceIndexRef.current = sentence.sentenceIndex;
+    sentenceIndexRef.current = clamped;
     setState((current) => ({
       ...current,
-      currentSentenceIndex: sentence.sentenceIndex,
+      currentSentenceIndex: clamped,
       currentPage: sentence.pageNumber,
       isPlaying: false,
       isLoading: false,
@@ -204,18 +189,7 @@ export function useAudioQueue(document: ParsedDocument | null, initialProgress: 
   }
 
   function skip(delta: number): void {
-    if (!document) {
-      return;
-    }
-
-    const currentPosition = findSentencePositionByIndex(document.sentences, state.currentSentenceIndex) ?? 0;
-    const nextPosition = Math.max(0, Math.min(currentPosition + delta, document.sentences.length - 1));
-    const nextSentence = document.sentences[nextPosition];
-    if (!nextSentence) {
-      return;
-    }
-
-    seekSentence(nextSentence.sentenceIndex);
+    seekSentence(state.currentSentenceIndex + delta);
   }
 
   async function startFromPage(pageNumber: number): Promise<void> {
@@ -252,7 +226,7 @@ export function useAudioQueue(document: ParsedDocument | null, initialProgress: 
       error: null
     }));
 
-    await advanceToNextPlayableSentence(firstSentenceIndex, "page-start");
+    await playSentenceAt(firstSentenceIndex);
   }
 
   function setPlaybackRate(rate: number): void {
@@ -263,9 +237,15 @@ export function useAudioQueue(document: ParsedDocument | null, initialProgress: 
     setState((current) => ({ ...current, playbackRate: rate }));
   }
 
-  async function ensureBuffered(parsedDocument: ParsedDocument, startPosition: number, speed: number): Promise<void> {
-    const missing = parsedDocument.sentences
-      .slice(startPosition, startPosition + PREFETCH_WINDOW)
+  async function ensureBuffered(parsedDocument: ParsedDocument, startIndex: number, speed: number): Promise<void> {
+    const startPosition = findSentencePositionByIndex(parsedDocument.sentences, startIndex);
+    if (startPosition === null) {
+      return;
+    }
+
+    const requestedSentences = parsedDocument.sentences
+      .slice(startPosition, startPosition + PREFETCH_WINDOW);
+    const missing = requestedSentences
       .filter((sentence) => !cacheRef.current.has(sentence.sentenceIndex));
 
     if (missing.length === 0) {
@@ -277,10 +257,10 @@ export function useAudioQueue(document: ParsedDocument | null, initialProgress: 
       speed,
       sentences: missing
     });
-    console.info("[audio] buffered synthesis items", {
+    console.info("[audio] buffered synthesis response", {
       requestedSentenceIndexes: missing.map((sentence) => sentence.sentenceIndex),
       receivedSentenceIndexes: items.map((item) => item.sentenceIndex),
-      receivedItemCount: items.length
+      itemCount: items.length
     });
     hydrateCache(items);
   }
@@ -305,13 +285,13 @@ export function useAudioQueue(document: ParsedDocument | null, initialProgress: 
     setPlaybackRate
   };
 
-  async function playSentenceAt(position: number): Promise<boolean> {
+  async function playSentenceAt(index: number): Promise<void> {
     const activeDocument = documentRef.current;
     if (!activeDocument) {
-      return false;
+      return;
     }
 
-    const sentence = activeDocument.sentences[position];
+    const sentence = findSentenceByIndex(activeDocument.sentences, index);
     if (!sentence) {
       setState((current) => ({
         ...current,
@@ -319,26 +299,35 @@ export function useAudioQueue(document: ParsedDocument | null, initialProgress: 
         isLoading: false,
         error: "Selected sentence is unavailable."
       }));
-      return false;
+      return;
     }
 
     setState((current) => ({
       ...current,
-      currentSentenceIndex: sentence.sentenceIndex,
+      currentSentenceIndex: index,
       currentPage: sentence.pageNumber,
       isLoading: true,
       error: null
     }));
 
     try {
-      await ensureBuffered(activeDocument, position, playbackRateRef.current);
-      const src = cacheRef.current.get(sentence.sentenceIndex);
+      await ensureBuffered(activeDocument, index, playbackRateRef.current);
+      const src = cacheRef.current.get(index);
       if (!src) {
-        console.warn("SKIPPING SENTENCE:", {
-          sentenceIndex: sentence.sentenceIndex,
-          reason: "No synthesized audio returned"
-        });
-        return false;
+        const nextPlayableIndex = await findNextPlayableSentenceIndex(activeDocument, index, playbackRateRef.current, cacheRef.current);
+        if (nextPlayableIndex !== null) {
+          console.warn("SKIPPING SENTENCE:", {
+            sentenceIndex: index,
+            reason: "No playable audio returned for sentence",
+            nextPlayableIndex
+          });
+          console.log("PLAY NEXT:", nextPlayableIndex);
+          sentenceIndexRef.current = nextPlayableIndex;
+          await playSentenceAt(nextPlayableIndex);
+          return;
+        }
+
+        throw new Error("Failed to synthesize text");
       }
 
       const audio = audioRef.current;
@@ -346,62 +335,48 @@ export function useAudioQueue(document: ParsedDocument | null, initialProgress: 
         throw new Error("Audio element unavailable");
       }
 
-      console.info("PLAY NEXT:", {
-        sentenceIndex: sentence.sentenceIndex,
-        pageNumber: sentence.pageNumber
-      });
-
       audio.volume = 1;
       audio.muted = false;
-      audio.currentTime = 0;
       audio.src = src;
       audio.playbackRate = playbackRateRef.current;
       await audio.play();
 
-      sentenceIndexRef.current = sentence.sentenceIndex;
+      sentenceIndexRef.current = index;
       setState((current) => ({
         ...current,
-        currentSentenceIndex: sentence.sentenceIndex,
+        currentSentenceIndex: index,
         currentPage: sentence.pageNumber,
         isPlaying: true,
         isLoading: false,
         error: null
       }));
-      void ensureBuffered(activeDocument, position + 1, playbackRateRef.current);
-      return true;
+      void ensureBuffered(activeDocument, index + 1, playbackRateRef.current);
     } catch (error) {
-      console.warn("SKIPPING SENTENCE:", {
-        sentenceIndex: sentence.sentenceIndex,
-        reason: error instanceof Error ? error.message : "Playback failed"
-      });
-      return false;
+      setState((current) => ({
+        ...current,
+        isPlaying: false,
+        isLoading: false,
+        error: error instanceof Error ? error.message : "Playback failed"
+      }));
     }
   }
 
-  async function advanceToNextPlayableSentence(startSentenceIndex: number, reason: string): Promise<void> {
-    const activeDocument = documentRef.current;
-    if (!activeDocument) {
+  async function advanceToNextSentence(activeDocument: ParsedDocument, currentSentenceIndex: number): Promise<void> {
+    const nextSentenceIndex = await findNextPlayableSentenceIndex(
+      activeDocument,
+      currentSentenceIndex,
+      playbackRateRef.current,
+      cacheRef.current
+    );
+
+    if (nextSentenceIndex === null) {
+      setState((current) => ({ ...current, isPlaying: false, isLoading: false }));
       return;
     }
 
-    const startPosition = findSentencePositionByIndex(activeDocument.sentences, startSentenceIndex) ?? 0;
-    for (let candidatePosition = startPosition; candidatePosition < activeDocument.sentences.length; candidatePosition += 1) {
-      const played = await playSentenceAt(candidatePosition);
-      if (played) {
-        return;
-      }
-    }
-
-    console.warn("[audio] playback stopped after exhausting playable sentences", {
-      startSentenceIndex,
-      reason
-    });
-    setState((current) => ({
-      ...current,
-      isPlaying: false,
-      isLoading: false,
-      error: null
-    }));
+    console.log("PLAY NEXT:", nextSentenceIndex);
+    sentenceIndexRef.current = nextSentenceIndex;
+    await playSentenceAt(nextSentenceIndex);
   }
 }
 
@@ -450,8 +425,7 @@ function resolvePlaybackPosition(document: ParsedDocument, initialProgress: Play
   }
 
   const clampedPage = clampPageNumber(initialProgress.currentPage, document.pageCount);
-  const matchingPosition = findSentencePositionByIndex(document.sentences, initialProgress.sentenceIndex);
-  const matchingSentence = matchingPosition === null ? null : document.sentences[matchingPosition];
+  const matchingSentence = document.sentences[initialProgress.sentenceIndex];
   if (matchingSentence && matchingSentence.pageNumber === clampedPage) {
     return {
       sentenceIndex: matchingSentence.sentenceIndex,
@@ -468,6 +442,80 @@ function resolvePlaybackPosition(document: ParsedDocument, initialProgress: Play
   }
 
   return fallback;
+}
+
+function findNextBufferedSentenceIndex(cache: Map<number, string>, document: ParsedDocument, startIndex: number): number | null {
+  const startPosition = findSentencePositionByIndex(document.sentences, startIndex);
+  if (startPosition === null) {
+    return null;
+  }
+
+  for (let position = startPosition; position < Math.min(document.sentences.length, startPosition + PREFETCH_WINDOW); position += 1) {
+    const sentence = document.sentences[position];
+    if (cache.has(sentence.sentenceIndex)) {
+      return sentence.sentenceIndex;
+    }
+  }
+
+  return null;
+}
+
+async function findNextPlayableSentenceIndex(
+  document: ParsedDocument,
+  currentSentenceIndex: number,
+  playbackRate: number,
+  cache: Map<number, string>
+): Promise<number | null> {
+  const currentPosition = findSentencePositionByIndex(document.sentences, currentSentenceIndex);
+  if (currentPosition === null) {
+    return null;
+  }
+
+  for (let startPosition = currentPosition + 1; startPosition < document.sentences.length; startPosition += PREFETCH_WINDOW) {
+    const startSentence = document.sentences[startPosition];
+    if (!startSentence) {
+      return null;
+    }
+
+    const requestedWindow = document.sentences.slice(startPosition, startPosition + PREFETCH_WINDOW);
+    const missing = requestedWindow.filter((sentence) => !cache.has(sentence.sentenceIndex));
+    if (missing.length > 0) {
+      const items = await queueSynthesis({
+        voice: "af_sarah",
+        speed: playbackRate,
+        sentences: missing
+      });
+
+      console.info("[audio] forward-fill synthesis response", {
+        requestedSentenceIndexes: missing.map((sentence) => sentence.sentenceIndex),
+        receivedSentenceIndexes: items.map((item) => item.sentenceIndex),
+        itemCount: items.length
+      });
+
+      for (const item of items) {
+        if (!cache.has(item.sentenceIndex)) {
+          cache.set(item.sentenceIndex, createAudioObjectUrl(item.audioBase64));
+        }
+      }
+    }
+
+    for (const sentence of requestedWindow) {
+      if (cache.has(sentence.sentenceIndex)) {
+        return sentence.sentenceIndex;
+      }
+
+      console.warn("SKIPPING SENTENCE:", {
+        sentenceIndex: sentence.sentenceIndex,
+        reason: "No playable audio returned after buffering"
+      });
+    }
+  }
+
+  return null;
+}
+
+function findSentenceByIndex(sentences: SentenceChunk[], sentenceIndex: number): SentenceChunk | null {
+  return sentences.find((sentence) => sentence.sentenceIndex === sentenceIndex) ?? null;
 }
 
 function findSentencePositionByIndex(sentences: SentenceChunk[], sentenceIndex: number): number | null {
