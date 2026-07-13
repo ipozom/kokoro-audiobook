@@ -55,7 +55,25 @@ def _synthesize_impl(request: SynthesisRequest) -> SynthesisResponse:
     if len(request.chunks) > settings.max_batch_items:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="batch exceeds max_batch_items")
 
-    items = engine.synthesize_batch(chunks=request.chunks, voice=request.voice, speed=request.speed)
+    logging.info(
+        "Received synthesis request voice=%s chunks=%s text_lengths=%s",
+        request.voice,
+        len(request.chunks),
+        [len(chunk.text) for chunk in request.chunks],
+    )
+
+    try:
+        items = engine.synthesize_batch(chunks=request.chunks, voice=request.voice, speed=request.speed)
+    except Exception as exc:  # pragma: no cover - runtime logging path
+        logging.exception(
+            "Failed to synthesize text voice=%s chunks=%s text_lengths=%s error=%s",
+            request.voice,
+            len(request.chunks),
+            [len(chunk.text) for chunk in request.chunks],
+            exc,
+        )
+        raise
+
     runtime_health = engine.health()
     return SynthesisResponse(
         device=runtime_health.device,

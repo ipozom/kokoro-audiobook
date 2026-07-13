@@ -39,6 +39,12 @@ export function DocumentReader({ file, document, currentPage, currentSentenceInd
   const requestedStartPage = Number.parseInt(startPageInput, 10);
   const hasValidRequestedPage = Number.isInteger(requestedStartPage) && requestedStartPage >= 1 && requestedStartPage <= document.pageCount;
 
+  function setVisiblePage(nextPage: number): void {
+    setPageNumber(nextPage);
+    setStartPageInput(String(nextPage));
+    setValidationMessage(null);
+  }
+
   function handleStartFromPage(): void {
     if (!hasValidRequestedPage) {
       setValidationMessage(`Enter a page between 1 and ${document.pageCount}.`);
@@ -47,6 +53,11 @@ export function DocumentReader({ file, document, currentPage, currentSentenceInd
 
     setValidationMessage(null);
     onStartFromPage(requestedStartPage);
+  }
+
+  function handleReadFromCurrentPage(): void {
+    setValidationMessage(null);
+    onStartFromPage(pageNumber);
   }
 
   useEffect(() => {
@@ -94,14 +105,14 @@ export function DocumentReader({ file, document, currentPage, currentSentenceInd
             <button
               className="rounded-full border border-stone-300 px-4 py-2 text-sm"
               type="button"
-              onClick={() => setPageNumber((current) => Math.max(1, current - 1))}
+              onClick={() => setVisiblePage(Math.max(1, pageNumber - 1))}
             >
               Prev page
             </button>
             <button
               className="rounded-full border border-stone-300 px-4 py-2 text-sm"
               type="button"
-              onClick={() => setPageNumber((current) => Math.min(document.pageCount, current + 1))}
+              onClick={() => setVisiblePage(Math.min(document.pageCount, pageNumber + 1))}
             >
               Next page
             </button>
@@ -126,6 +137,13 @@ export function DocumentReader({ file, document, currentPage, currentSentenceInd
               disabled={!hasValidRequestedPage}
             >
               Start from page
+            </button>
+            <button
+              className="rounded-full border border-ink px-4 py-2 text-sm text-ink"
+              type="button"
+              onClick={handleReadFromCurrentPage}
+            >
+              Read from current page
             </button>
           </div>
         </div>

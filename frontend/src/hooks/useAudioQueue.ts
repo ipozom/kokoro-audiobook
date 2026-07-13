@@ -88,17 +88,18 @@ export function useAudioQueue(document: ParsedDocument | null, initialProgress: 
       return;
     }
 
-    console.info("[audio] playback ended", {
+    console.info("ENDED:", {
       sentenceIndex: sentenceIndexRef.current
     });
 
-    const nextIndex = sentenceIndexRef.current + 1;
-    if (nextIndex >= activeDocument.sentences.length) {
+    const currentPosition = findSentencePositionByIndex(activeDocument.sentences, sentenceIndexRef.current);
+    const nextPosition = currentPosition === null ? 0 : currentPosition + 1;
+    if (nextPosition >= activeDocument.sentences.length) {
       setState((current) => ({ ...current, isPlaying: false }));
       return;
     }
 
-    void playSentenceAt(nextIndex);
+    void advanceToNextPlayableSentence(activeDocument.sentences[nextPosition].sentenceIndex, "audio-ended");
   });
 
   useEffect(() => {
@@ -155,7 +156,7 @@ export function useAudioQueue(document: ParsedDocument | null, initialProgress: 
   });
 
   async function play(): Promise<void> {
-    await playSentenceAt(sentenceIndexRef.current);
+    await advanceToNextPlayableSentence(sentenceIndexRef.current, "play-request");
   }
 
   function pause(): void {
@@ -183,13 +184,18 @@ export function useAudioQueue(document: ParsedDocument | null, initialProgress: 
       return;
     }
 
-    const clamped = Math.max(0, Math.min(index, document.sentences.length - 1));
-    const sentence = document.sentences[clamped];
+    const sentencePosition = findSentencePositionByIndex(document.sentences, index);
+    const clampedPosition = sentencePosition ?? 0;
+    const sentence = document.sentences[clampedPosition];
+    if (!sentence) {
+      return;
+    }
+
     resetRuntime(false);
-    sentenceIndexRef.current = clamped;
+    sentenceIndexRef.current = sentence.sentenceIndex;
     setState((current) => ({
       ...current,
-      currentSentenceIndex: clamped,
+      currentSentenceIndex: sentence.sentenceIndex,
       currentPage: sentence.pageNumber,
       isPlaying: false,
       isLoading: false,
@@ -198,7 +204,18 @@ export function useAudioQueue(document: ParsedDocument | null, initialProgress: 
   }
 
   function skip(delta: number): void {
-    seekSentence(state.currentSentenceIndex + delta);
+    if (!document) {
+      return;
+    }
+
+    const currentPosition = findSentencePositionByIndex(document.sentences, state.currentSentenceIndex) ?? 0;
+    const nextPosition = Math.max(0, Math.min(currentPosition + delta, document.sentences.length - 1));
+    const nextSentence = document.sentences[nextPosition];
+    if (!nextSentence) {
+      return;
+    }
+
+    seekSentence(nextSentence.sentenceIndex);
   }
 
   async function startFromPage(pageNumber: number): Promise<void> {
@@ -235,7 +252,7 @@ export function useAudioQueue(document: ParsedDocument | null, initialProgress: 
       error: null
     }));
 
-    await playSentenceAt(firstSentenceIndex);
+    await advanceToNextPlayableSentence(firstSentenceIndex, "page-start");
   }
 
   function setPlaybackRate(rate: number): void {
@@ -246,9 +263,9 @@ export function useAudioQueue(document: ParsedDocument | null, initialProgress: 
     setState((current) => ({ ...current, playbackRate: rate }));
   }
 
-  async function ensureBuffered(parsedDocument: ParsedDocument, startIndex: number, speed: number): Promise<void> {
+  async function ensureBuffered(parsedDocument: ParsedDocument, startPosition: number, speed: number): Promise<void> {
     const missing = parsedDocument.sentences
-      .slice(startIndex, startIndex + PREFETCH_WINDOW)
+      .slice(startPosition, startPosition + PREFETCH_WINDOW)
       .filter((sentence) => !cacheRef.current.has(sentence.sentenceIndex));
 
     if (missing.length === 0) {
@@ -259,6 +276,11 @@ export function useAudioQueue(document: ParsedDocument | null, initialProgress: 
       voice: "af_sarah",
       speed,
       sentences: missing
+    });
+    console.info("[audio] buffered synthesis items", {
+      requestedSentenceIndexes: missing.map((sentence) => sentence.sentenceIndex),
+      receivedSentenceIndexes: items.map((item) => item.sentenceIndex),
+      receivedItemCount: items.length
     });
     hydrateCache(items);
   }
@@ -283,13 +305,13 @@ export function useAudioQueue(document: ParsedDocument | null, initialProgress: 
     setPlaybackRate
   };
 
-  async function playSentenceAt(index: number): Promise<void> {
+  async function playSentenceAt(position: number): Promise<boolean> {
     const activeDocument = documentRef.current;
     if (!activeDocument) {
-      return;
+      return false;
     }
 
-    const sentence = activeDocument.sentences[index];
+    const sentence = activeDocument.sentences[position];
     if (!sentence) {
       setState((current) => ({
         ...current,
@@ -297,22 +319,26 @@ export function useAudioQueue(document: ParsedDocument | null, initialProgress: 
         isLoading: false,
         error: "Selected sentence is unavailable."
       }));
-      return;
+      return false;
     }
 
     setState((current) => ({
       ...current,
-      currentSentenceIndex: index,
+      currentSentenceIndex: sentence.sentenceIndex,
       currentPage: sentence.pageNumber,
       isLoading: true,
       error: null
     }));
 
     try {
-      await ensureBuffered(activeDocument, index, playbackRateRef.current);
-      const src = cacheRef.current.get(index);
+      await ensureBuffered(activeDocument, position, playbackRateRef.current);
+      const src = cacheRef.current.get(sentence.sentenceIndex);
       if (!src) {
-        throw new Error("Audio cache miss");
+        console.warn("SKIPPING SENTENCE:", {
+          sentenceIndex: sentence.sentenceIndex,
+          reason: "No synthesized audio returned"
+        });
+        return false;
       }
 
       const audio = audioRef.current;
@@ -320,30 +346,62 @@ export function useAudioQueue(document: ParsedDocument | null, initialProgress: 
         throw new Error("Audio element unavailable");
       }
 
+      console.info("PLAY NEXT:", {
+        sentenceIndex: sentence.sentenceIndex,
+        pageNumber: sentence.pageNumber
+      });
+
       audio.volume = 1;
       audio.muted = false;
+      audio.currentTime = 0;
       audio.src = src;
       audio.playbackRate = playbackRateRef.current;
       await audio.play();
 
-      sentenceIndexRef.current = index;
+      sentenceIndexRef.current = sentence.sentenceIndex;
       setState((current) => ({
         ...current,
-        currentSentenceIndex: index,
+        currentSentenceIndex: sentence.sentenceIndex,
         currentPage: sentence.pageNumber,
         isPlaying: true,
         isLoading: false,
         error: null
       }));
-      void ensureBuffered(activeDocument, index + 1, playbackRateRef.current);
+      void ensureBuffered(activeDocument, position + 1, playbackRateRef.current);
+      return true;
     } catch (error) {
-      setState((current) => ({
-        ...current,
-        isPlaying: false,
-        isLoading: false,
-        error: error instanceof Error ? error.message : "Playback failed"
-      }));
+      console.warn("SKIPPING SENTENCE:", {
+        sentenceIndex: sentence.sentenceIndex,
+        reason: error instanceof Error ? error.message : "Playback failed"
+      });
+      return false;
     }
+  }
+
+  async function advanceToNextPlayableSentence(startSentenceIndex: number, reason: string): Promise<void> {
+    const activeDocument = documentRef.current;
+    if (!activeDocument) {
+      return;
+    }
+
+    const startPosition = findSentencePositionByIndex(activeDocument.sentences, startSentenceIndex) ?? 0;
+    for (let candidatePosition = startPosition; candidatePosition < activeDocument.sentences.length; candidatePosition += 1) {
+      const played = await playSentenceAt(candidatePosition);
+      if (played) {
+        return;
+      }
+    }
+
+    console.warn("[audio] playback stopped after exhausting playable sentences", {
+      startSentenceIndex,
+      reason
+    });
+    setState((current) => ({
+      ...current,
+      isPlaying: false,
+      isLoading: false,
+      error: null
+    }));
   }
 }
 
@@ -392,7 +450,8 @@ function resolvePlaybackPosition(document: ParsedDocument, initialProgress: Play
   }
 
   const clampedPage = clampPageNumber(initialProgress.currentPage, document.pageCount);
-  const matchingSentence = document.sentences[initialProgress.sentenceIndex];
+  const matchingPosition = findSentencePositionByIndex(document.sentences, initialProgress.sentenceIndex);
+  const matchingSentence = matchingPosition === null ? null : document.sentences[matchingPosition];
   if (matchingSentence && matchingSentence.pageNumber === clampedPage) {
     return {
       sentenceIndex: matchingSentence.sentenceIndex,
@@ -409,6 +468,11 @@ function resolvePlaybackPosition(document: ParsedDocument, initialProgress: Play
   }
 
   return fallback;
+}
+
+function findSentencePositionByIndex(sentences: SentenceChunk[], sentenceIndex: number): number | null {
+  const position = sentences.findIndex((sentence) => sentence.sentenceIndex === sentenceIndex);
+  return position >= 0 ? position : null;
 }
 
 function revokeCachedAudioUrls(cache: Map<number, string>): void {

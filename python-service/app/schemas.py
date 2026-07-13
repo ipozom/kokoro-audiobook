@@ -33,7 +33,7 @@ class SynthesisChunk(BaseModel):
     def normalize_text(cls, value: str) -> str:
         """Trim and normalize surrounding whitespace before synthesis."""
 
-        normalized = " ".join(value.split())
+        normalized = " ".join(value.replace("\u200b", "").replace("\ufeff", "").split())
         if not normalized:
             raise ValueError("text must not be blank")
         return normalized
