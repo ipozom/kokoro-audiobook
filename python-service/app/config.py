@@ -22,16 +22,40 @@ class Settings(BaseSettings):
     max_batch_items: int = Field(default=8)
     warmup_text: str = Field(default="Kokoro GPU warmup complete.")
     kokoro_module: str = Field(default="kokoro")
-    kokoro_factory: str = Field(default="KPipeline")
-    kokoro_model_path: str = Field(default="models/kokoro-82m")
+    kokoro_repo_id: str = Field(default="hexgrad/Kokoro-82M")
+    kokoro_lang_code: str = Field(default="a")
+    kokoro_model_file: str = Field(default="kokoro-v1_0.pth")
+    kokoro_config_file: str = Field(default="config.json")
+    kokoro_voice_file: str = Field(default="voices/af_sarah.pt")
+    kokoro_model_path: str | None = Field(default=None)
+    kokoro_config_path: str | None = Field(default=None)
+    kokoro_voice_path: str | None = Field(default=None)
     log_level: str = Field(default="INFO")
     max_workers: int = Field(default=1)
 
     @property
-    def resolved_model_path(self) -> Path:
-        """Resolve the configured Kokoro model path relative to the service root."""
+    def resolved_model_path(self) -> Path | None:
+        """Resolve an explicitly configured Kokoro model path if one is provided."""
 
+        if not self.kokoro_model_path:
+            return None
         return Path(self.kokoro_model_path).expanduser().resolve()
+
+    @property
+    def resolved_config_path(self) -> Path | None:
+        """Resolve an explicitly configured Kokoro config path if one is provided."""
+
+        if not self.kokoro_config_path:
+            return None
+        return Path(self.kokoro_config_path).expanduser().resolve()
+
+    @property
+    def resolved_voice_path(self) -> Path | None:
+        """Resolve an explicitly configured Kokoro voice path if one is provided."""
+
+        if not self.kokoro_voice_path:
+            return None
+        return Path(self.kokoro_voice_path).expanduser().resolve()
 
 
 @lru_cache(maxsize=1)

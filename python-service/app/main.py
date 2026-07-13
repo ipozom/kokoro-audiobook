@@ -47,8 +47,7 @@ def health() -> HealthResponse:
     return engine.health()
 
 
-@app.post("/synthesize", response_model=SynthesisResponse, dependencies=[Depends(validate_api_key)])
-def synthesize(request: SynthesisRequest) -> SynthesisResponse:
+def _synthesize_impl(request: SynthesisRequest) -> SynthesisResponse:
     """Synthesize a batch of text chunks into base64-encoded WAV items."""
 
     if any(len(chunk.text) > settings.max_text_chars for chunk in request.chunks):
@@ -57,4 +56,24 @@ def synthesize(request: SynthesisRequest) -> SynthesisResponse:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="batch exceeds max_batch_items")
 
     items = engine.synthesize_batch(chunks=request.chunks, voice=request.voice, speed=request.speed)
-    return SynthesisResponse(device=str(engine.health().device_name), voice=request.voice, items=items)
+    runtime_health = engine.health()
+    return SynthesisResponse(
+        device=runtime_health.device,
+        device_name=runtime_health.device_name,
+        voice=request.voice,
+        items=items,
+    )
+
+
+@app.post("/synthesize", response_model=SynthesisResponse, dependencies=[Depends(validate_api_key)])
+def synthesize(request: SynthesisRequest) -> SynthesisResponse:
+    """Backward-compatible synthesis endpoint."""
+
+    return _synthesize_impl(request)
+
+
+@app.post("/tts", response_model=SynthesisResponse, dependencies=[Depends(validate_api_key)])
+def tts(request: SynthesisRequest) -> SynthesisResponse:
+    """Primary runtime synthesis endpoint for direct verification."""
+
+    return _synthesize_impl(request)

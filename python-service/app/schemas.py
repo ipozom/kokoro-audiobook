@@ -8,11 +8,17 @@ class HealthResponse(BaseModel):
 
     status: str
     cuda_available: bool
+    device: str
     device_name: str
     vram_total_mb: float | None = None
     vram_reserved_mb: float | None = None
     vram_allocated_mb: float | None = None
     warm: bool
+    model_loaded: bool
+    model_repo_id: str
+    model_config_path: str
+    model_weights_path: str
+    default_voice_path: str
 
 
 class SynthesisChunk(BaseModel):
@@ -55,5 +61,6 @@ class SynthesisResponse(BaseModel):
     """Batch synthesis response."""
 
     device: str
+    device_name: str
     voice: str
     items: list[SynthesisItem]

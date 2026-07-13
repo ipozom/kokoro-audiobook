@@ -1,4 +1,7 @@
-import { getDocument, GlobalWorkerOptions } from "pdfjs-dist/legacy/build/pdf.mjs";
+import path from "node:path";
+import { createRequire } from "node:module";
+
+import { getDocument } from "pdfjs-dist/legacy/build/pdf.mjs";
 
 import { serverConfig } from "../config.js";
 import type { ParsedDocument, SentenceChunk } from "../types.js";
@@ -6,7 +9,9 @@ import { HttpError } from "../utils/errors.js";
 import { hashBuffer } from "../utils/hash.js";
 import { normalizeExtractedText, segmentPageText } from "../utils/text.js";
 
-GlobalWorkerOptions.workerSrc = undefined as never;
+const require = createRequire(import.meta.url);
+const pdfjsPackageRoot = path.dirname(require.resolve("pdfjs-dist/package.json"));
+const standardFontDataUrl = `${path.join(pdfjsPackageRoot, "standard_fonts")}${path.sep}`;
 
 /** Validate the uploaded PDF before it reaches the parser. */
 export function validatePdfBuffer(fileName: string, buffer: Buffer, mimeType: string): void {
@@ -30,7 +35,8 @@ export async function parsePdfDocument(fileName: string, buffer: Buffer): Promis
     isEvalSupported: false,
     useWorkerFetch: false,
     disableFontFace: true,
-    stopAtErrors: true
+    stopAtErrors: true,
+    standardFontDataUrl
   });
 
   const pdfDocument = await loadingTask.promise;

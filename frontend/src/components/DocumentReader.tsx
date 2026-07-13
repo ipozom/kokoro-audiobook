@@ -34,7 +34,26 @@ export function DocumentReader({ file, document, currentSentenceIndex, onSentenc
       return;
     }
 
-    void renderPdfPage(file, pageNumber, canvasRef.current);
+    let cancelled = false;
+    let cancelRender: (() => void) | null = null;
+
+    void renderPdfPage(file, pageNumber, canvasRef.current).then((cleanup) => {
+      if (cancelled) {
+        cleanup();
+        return;
+      }
+      cancelRender = cleanup;
+    }).catch((error: unknown) => {
+      if (error instanceof Error && error.name === "RenderingCancelledException") {
+        return;
+      }
+      throw error;
+    });
+
+    return () => {
+      cancelled = true;
+      cancelRender?.();
+    };
   }, [file, pageNumber]);
 
   return (
@@ -84,7 +103,7 @@ export function DocumentReader({ file, document, currentSentenceIndex, onSentenc
   );
 }
 
-async function renderPdfPage(file: File, pageNumber: number, canvas: HTMLCanvasElement): Promise<void> {
+async function renderPdfPage(file: File, pageNumber: number, canvas: HTMLCanvasElement): Promise<() => void> {
   const bytes = new Uint8Array(await file.arrayBuffer());
   const pdf = await getDocument({ data: bytes }).promise;
   const page = await pdf.getPage(pageNumber);
@@ -97,5 +116,7 @@ async function renderPdfPage(file: File, pageNumber: number, canvas: HTMLCanvasE
     throw new Error("2D canvas context unavailable");
   }
 
-  await page.render({ canvasContext: context, viewport }).promise;
+  const renderTask = page.render({ canvasContext: context, viewport });
+  await renderTask.promise;
+  return () => renderTask.cancel();
 }

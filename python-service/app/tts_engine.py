@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import io
 import logging
+from time import perf_counter
 import wave
 from threading import Lock
 
@@ -66,17 +67,24 @@ class TTSEngine:
         return HealthResponse(
             status="ok",
             cuda_available=self._device.type == "cuda",
+            device=str(self._device),
             device_name=device_name,
             vram_total_mb=total_mb,
             vram_reserved_mb=reserved_mb,
             vram_allocated_mb=allocated_mb,
             warm=self._warm,
+            model_loaded=self._adapter.model_loaded,
+            model_repo_id=self._settings.kokoro_repo_id,
+            model_config_path=str(self._adapter.config_path),
+            model_weights_path=str(self._adapter.model_path),
+            default_voice_path=str(self._adapter.default_voice_path),
         )
 
     def synthesize_batch(self, chunks: list[SynthesisChunk], voice: str, speed: float) -> list[SynthesisItem]:
         """Synthesize a bounded chunk batch and encode each result as base64 WAV."""
 
         with self._lock:
+            start = perf_counter()
             audios = self._adapter.synthesize([chunk.text for chunk in chunks], voice=voice, speed=speed)
             if self._device.type == "cuda":
                 torch.cuda.synchronize(self._device)
@@ -95,6 +103,14 @@ class TTSEngine:
                 )
 
             self._cleanup_cuda_cache()
+            elapsed_ms = round((perf_counter() - start) * 1000, 2)
+            LOGGER.info(
+                "Synthesized batch voice=%s chunks=%s latency_ms=%s vram_allocated_mb=%s",
+                voice,
+                len(chunks),
+                elapsed_ms,
+                self.health().vram_allocated_mb,
+            )
             return items
 
     def _encode_wav(self, audio) -> tuple[bytes, int]:
