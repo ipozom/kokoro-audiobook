@@ -143,9 +143,14 @@ export function useAudioQueue(document: ParsedDocument | null, initialProgress: 
         throw new Error("Audio cache miss");
       }
 
-      audioRef.current.src = src;
-      audioRef.current.playbackRate = state.playbackRate;
-      await audioRef.current.play();
+      const audio = audioRef.current;
+      if (!audio) {
+        throw new Error("Audio element unavailable");
+      }
+
+      audio.src = src;
+      audio.playbackRate = state.playbackRate;
+      await audio.play();
 
       setState((current) => ({
         ...current,

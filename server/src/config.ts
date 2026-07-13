@@ -11,7 +11,7 @@ const envSchema = z.object({
   MAX_PDF_PAGES: z.coerce.number().int().positive().default(1000),
   DATA_DIR: z.string().default("./data"),
   PYTHON_TTS_URL: z.string().url().default("http://127.0.0.1:8001"),
-  PYTHON_TTS_API_KEY: z.string().min(1),
+  PYTHON_TTS_API_KEY: z.string().min(1).default("change-me"),
   PDF_UPLOAD_FIELD: z.string().default("pdf")
 });
 
