@@ -5,7 +5,7 @@ import { z } from "zod";
 loadEnv();
 
 const envSchema = z.object({
-  PORT: z.coerce.number().int().positive().default(4000),
+  PORT: z.coerce.number().int().positive().default(4001),
   CORS_ORIGIN: z.string().default("http://localhost:5173"),
   MAX_PDF_BYTES: z.coerce.number().int().positive().default(25 * 1024 * 1024),
   MAX_PDF_PAGES: z.coerce.number().int().positive().default(1000),

@@ -129,6 +129,50 @@ The current implementation is validated against Kokoro-82M with local or Hugging
 
 ## Run Instructions
 
+The local stack uses three ports:
+
+| Component | Default port | Configuration |
+| --- | ---: | --- |
+| Frontend / Vite | `5173` | `frontend/vite.config.ts` (`server.port`) |
+| Node API | `4001` | `server/.env` (`PORT`) and `server/src/config.ts` fallback |
+| Python TTS | `8001` | `python-service/.env` (`PORT`) |
+
+### Change ports
+
+When changing the Node API port, update both the Node listener and the Vite proxy:
+
+1. Set `PORT` in `server/.env`.
+2. Set the matching target in `frontend/vite.config.ts` under `server.proxy["/api"]`.
+3. Restart the Node API and frontend development servers.
+
+For example, to move Node from `4001` to `4101`:
+
+```dotenv
+# server/.env
+PORT=4101
+```
+
+```ts
+// frontend/vite.config.ts
+proxy: {
+	"/api": "http://localhost:4101"
+}
+```
+
+The Python port can be changed independently. Set `PORT` in `python-service/.env`,
+then update `PYTHON_TTS_URL` in `server/.env` to the same host and port. Keep
+`PYTHON_TTS_API_KEY` in `server/.env` identical to `API_KEY` in
+`python-service/.env`.
+
+Verify the full health path after changing ports:
+
+```bash
+curl http://127.0.0.1:8001/health \
+	-H 'X-API-Key: local-dev-key'
+curl http://127.0.0.1:4001/api/health
+curl http://127.0.0.1:5173/api/tts/health
+```
+
 Start the Python service:
 
 ```bash
@@ -155,6 +199,10 @@ Or run the workspace dev workflow if your root scripts provide it:
 npm run dev
 ```
 
+The combined workflow starts Node on `4001` and Vite on `5173`. The Python
+service must be started separately because it runs in its own virtual environment
+and requires access to the host CUDA runtime.
+
 ## Usage
 
 ### Upload PDF
@@ -178,6 +226,31 @@ npm run dev
 5. If the page has no extracted sentences, playback stops and the app shows a non-fatal message.
 
 ## Testing Instructions
+
+### Build / compile the complete project
+
+Install the Node workspace dependencies once:
+
+```bash
+npm install
+```
+
+Build both TypeScript workspaces from the repository root:
+
+```bash
+npm run build
+```
+
+Run the server tests and validate Python syntax:
+
+```bash
+npm test
+cd python-service
+source .venv/bin/activate
+python3 -m py_compile app/*.py
+```
+
+The production Node entrypoint is emitted at `server/dist/src/server.js`.
 
 ### Functional checks
 

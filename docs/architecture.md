@@ -4,9 +4,88 @@
 
 This application is a three-tier local pipeline for turning PDFs into synchronized audiobook playback.
 
-Textual diagram:
+```mermaid
+flowchart LR
+	Browser[Browser UI<br/>React + TypeScript]
+	Vite[Vite dev server<br/>:5173]
+	Node[Node.js API<br/>Express :4001]
+	Python[Python TTS service<br/>FastAPI :8001]
+	Kokoro[Kokoro-82M<br/>PyTorch]
+	GPU[CUDA GPU<br/>cuda:0]
+	Store[(Progress and<br/>document data)]
 
-`React frontend -> Node.js API -> Python FastAPI service -> Kokoro-82M -> CUDA GPU`
+	Browser -->|HTTP /api/*| Vite
+	Vite -->|Proxy /api| Node
+	Node -->|PDF extraction<br/>progress persistence| Store
+	Node -->|Authenticated health<br/>and synthesis| Python
+	Python --> Kokoro
+	Kokoro --> GPU
+	Python -->|Base64 WAV chunks| Node
+	Node -->|JSON API response| Vite
+	Vite --> Browser
+```
+
+The production Node API can be started on another port with `PORT`, but the
+Vite `/api` proxy must target the same port during development. The Python
+service remains on its configured `PORT`, and Node reaches it through
+`PYTHON_TTS_URL`.
+
+## Runtime Request Flow
+
+```mermaid
+sequenceDiagram
+	participant U as Browser
+	participant V as Vite :5173
+	participant N as Node API :4001
+	participant P as Python TTS :8001
+	participant G as CUDA / Kokoro
+
+	U->>V: GET /api/tts/health
+	V->>N: Proxy request
+	N->>P: GET /health + X-API-Key
+	P->>G: Read CUDA/model state
+	G-->>P: Health payload
+	P-->>N: 200 JSON
+	N-->>V: 200 JSON
+	V-->>U: Warm runtime status
+
+	U->>V: POST /api/tts/queue
+	V->>N: Proxy synthesis request
+	N->>P: Authenticated sentence batch
+	P->>G: Kokoro inference on cuda:0
+	G-->>P: WAV audio
+	P-->>N: Base64 WAV chunks
+	N-->>V: Queue response
+	V-->>U: Browser audio playback
+```
+
+## Port and Build Configuration
+
+| Component | Default port | Configuration source |
+| --- | ---: | --- |
+| Vite frontend | `5173` | `frontend/vite.config.ts` |
+| Node API | `4001` | `server/.env:PORT` |
+| Python TTS | `8001` | `python-service/.env:PORT` |
+
+Changing the Node port requires two coordinated edits: set `PORT` in
+`server/.env` and change the `/api` proxy target in `frontend/vite.config.ts`.
+Changing the Python port also requires updating `PYTHON_TTS_URL` in
+`server/.env`. The Node and Python API keys must match.
+
+Build the complete project from the repository root with:
+
+```bash
+npm install
+npm run build
+npm test
+cd python-service
+source .venv/bin/activate
+python3 -m py_compile app/*.py
+```
+
+`npm run build` compiles the Node API and frontend. The Node output entrypoint
+is `server/dist/src/server.js`; Python is validated with `py_compile` because it
+does not produce a separate compiled application bundle.
 
 Responsibilities by layer:
 
